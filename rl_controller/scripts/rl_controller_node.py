@@ -1,12 +1,15 @@
 #!/usr/bin/env python
-from math import atan2
+from genericpath import isfile
+from math import acos, sqrt
 import rospy
 import numpy as np
 from uuv_control_interfaces import DPControllerBase
-from torch import nn
+from torch import dtype, nn
 import torch
 from collections import deque
 import random
+import os
+import os.path
 
 GAMMA=0.99
 BATCH_SIZE=32
@@ -18,9 +21,13 @@ EPSILON_DECAY=10000
 TARGET_UPDATE_FREQ=1000
 ACTION_SPACE_SIZE = 360
 
+L = 10
+dir_path = os.path.dirname(os.path.realpath(__file__))
+PATH = os.path.join(dir_path, '../params/rl_controller.pt')
+
 class Network(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(Network, self).__init__()
 
         # Number of nodes in input layer
         in_features = 2
@@ -59,47 +66,117 @@ class RLController(DPControllerBase):
         self.online_net = Network()
         self.target_net = Network()
 
+        if os.path.isfile(PATH) and os.stat(PATH).st_size > 0:
+            self.online_net.load_state_dict(torch.load(PATH))
         self.target_net.load_state_dict(self.online_net.state_dict())
 
         self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=5e-4)
 
-        self.num_iterations = 0
+        self._num_iterations = 0
+
+        self.trajectory = []
+
+        self.vehicle_prev_pos = np.asarray([1, 0, 0])
 
     def _reset_controller(self):
         super(RLController, self)._reset_controller()
+        torch.save(self.online_net.state_dict(), PATH)
+        rospy.signal_shutdown('episode over')
 
-    def compute_mechanics(self):
-        d = self.error_pose_euler[2]
-        L = self.error_pose_euler[0]
-        c_d = atan2(d, L)
-        error_angle = self.error_pose_euler[4]
-        c = c_d - error_angle
-        return (c, c_d, d)
+    def perpendicular_point(self, x):
+        closest_dist = 1e10
+        closest_index = -1
+        l = 0
+        r = len(self.trajectory) - 1
+        if r < 0:
+            return closest_index
 
-    def compute_state(self):
-        (c, _, d) = self.compute_mechanics()
-        return (d, c)
+        while(r>=l):
+            mid = int((l+r)/2)
+            dist = abs(self.trajectory[mid][0] - x)
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_index = mid
+            if self.trajectory[mid][0] < x:
+                l = mid + 1
+            else:
+                r = mid - 1
+        return closest_index
 
-    def compute_reward(self):
-        (c, c_d, d) = self.compute_mechanics()
-        rew = -0.9 * abs(c_d - c) + 0.1 * pow(2, 2 - (d / 10))
-        return rew
+    def norm(self, x):
+        mod = sqrt(x[0] ** 2 + x[1] ** 2 + x[2] ** 2)
+        return mod
+    
+    def normalize(self, x):
+        mod = sqrt(x[0] ** 2 + x[1] ** 2 + x[2] ** 2)
+        if mod == 0:
+            return x
+        x = x / mod
+        return x
+    
+    def euclidean_distance(self, x, y):
+        return sqrt((x[0] - y[0]) ** 2 + (x[1] - y[1]) ** 2 + (x[2] - y[2]) ** 2)
+    
+    def compute_state_reward(self):
+        perpendicular_index = self.perpendicular_point(self._vehicle_model.pos[0])
+        if perpendicular_index != -1:
+            perpendicular_point = self.trajectory[perpendicular_index]
+            d = self.euclidean_distance(self._vehicle_model.pos, perpendicular_point)
+
+            slope = [0, 0, 0]
+            if perpendicular_index >= 1:
+                slope = (perpendicular_point - self.trajectory[perpendicular_index - 1]) /  self._dt
+            elif perpendicular_index + 1 < len(self.trajectory):
+                slope = (self.trajectory[perpendicular_index + 1] - perpendicular_point) /  self._dt
+            slope = self.normalize(slope)
+            target = perpendicular_point + slope * L
+
+            direction = target - self._vehicle_model.pos
+
+            vehicle_angle = (self._vehicle_model.pos - self.vehicle_prev_pos) / self._dt
+            
+            diff_vector = np.dot(direction, vehicle_angle) / (self.norm(direction) * self.norm(vehicle_angle))
+            diff_angle = acos(diff_vector)
+
+            state = np.array([d, diff_angle], dtype=np.float32)
+            rew = -0.9 * abs(diff_angle) + 0.1 * pow(2, 2 - (d / 10))
+
+            return (state, rew)
+
+        else:
+            state = np.array([0, 0, 0])
+            rew = 0.4
+            return (state, rew)
+
+    def compute_action(self, angle):
+        tau = np.zeros(6)
+        # Forward thrust
+        tau[0] = 50 
+        # Response to upward thrust
+        tau[2] = -260
+        # Rudder angle torque
+        angle -= 180
+        tau[5] = (float) (angle) / 180
+        tau[5] *= 100
+        return tau
 
     def check_done(self):
-        if self.error_pose_euler < 0.001:
+        if self._num_iterations >= 200:
             return True
         return False
     
     def update_controller(self):
-        if self.num_iterations < MIN_REPLAY_SIZE:
+        self.trajectory.append(self._reference['pos'])
+
+        if self._num_iterations < MIN_REPLAY_SIZE:
             action = random.randint(0, ACTION_SPACE_SIZE - 1)
-            obs = self.compute_state()
+            obs, _ = self.compute_state_reward()
 
             # Perform action
-            self.publish_control_wrench([0, 0, 0])
+            tau = self.compute_action(action)
+            self.publish_control_wrench(tau)
 
-            new_obs = self.compute_state()
-            rew = self.compute_reward()
+            new_obs, rew = self.compute_state_reward()
             done = self.check_done()
 
             transition = (obs, action, rew, done, new_obs)
@@ -110,25 +187,22 @@ class RLController(DPControllerBase):
                 self._reset_controller()
 
         else:
-            if self.num_iterations == MIN_REPLAY_SIZE:
-                self._reset_controller()
-            
-            step = self.num_iterations - MIN_REPLAY_SIZE
+            step = self._num_iterations - MIN_REPLAY_SIZE
             epsilon = np.interp(step, [0, EPSILON_DECAY], [EPSILON_START, EPSILON_END])
 
             rnd_sample = random.random()
 
-            obs = self.compute_state()
+            obs, _ = self.compute_state_reward()
             if rnd_sample <= epsilon:
                 action = random.randint(0, ACTION_SPACE_SIZE - 1)
             else:
                 action = self.online_net.act(obs)
 
             # Perform action
-            self.publish_control_wrench([0, 0, 0])
+            tau = self.compute_action(action)
+            self.publish_control_wrench(tau)
 
-            new_obs = self.compute_state()
-            rew = self.compute_reward()
+            new_obs, rew = self.compute_state_reward()
             done = self.check_done()
 
             transition = (obs, action, rew, done, new_obs)
@@ -136,11 +210,14 @@ class RLController(DPControllerBase):
 
             self.episode_reward += rew
 
+            # Logging
+            if step % 100 == 0:
+                print('Step', step)
+                print('Rew', rew)
+
             if done:
                 self._reset_controller()
-
                 self.rew_buffer.append(self.episode_reward)
-                self.episode_reward = 0.0
             
             # Start gradient step
             transitions = random.sample(self.replay_buffer, BATCH_SIZE)
@@ -178,13 +255,9 @@ class RLController(DPControllerBase):
             # Update target network
             if step % TARGET_UPDATE_FREQ == 0:
                 self.target_net.load_state_dict(self.online_net.state_dict())
-
-            # Logging
-            if step % 1000 == 0:
-                print('Step', step)
-                print('Avg rew', np.mean(self.rew_buffer))
         
-        self.num_iterations += 1
+        self._num_iterations += 1
+        self.vehicle_prev_pos = self._vehicle_model.pos
         
 
 if __name__ == '__main__':
