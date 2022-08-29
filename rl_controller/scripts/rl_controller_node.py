@@ -1,10 +1,9 @@
 #!/usr/bin/env python
-from genericpath import isfile
 from math import acos, sqrt
 import rospy
 import numpy as np
 from uuv_control_interfaces import DPControllerBase
-from torch import dtype, nn
+from torch import nn
 import torch
 from collections import deque
 import random
@@ -14,7 +13,7 @@ import os.path
 GAMMA=0.99
 BATCH_SIZE=32
 BUFFER_SIZE=50000
-MIN_REPLAY_SIZE=1000
+MIN_REPLAY_SIZE=100
 EPSILON_START=1.0
 EPSILON_END=0.02
 EPSILON_DECAY=10000
@@ -74,9 +73,10 @@ class RLController(DPControllerBase):
 
         self._num_iterations = 0
 
-        self.trajectory = []
+        self._trajectory = []
 
         self.vehicle_prev_pos = np.asarray([1, 0, 0])
+        self.end_point = None
 
     def _reset_controller(self):
         super(RLController, self)._reset_controller()
@@ -87,17 +87,17 @@ class RLController(DPControllerBase):
         closest_dist = 1e10
         closest_index = -1
         l = 0
-        r = len(self.trajectory) - 1
+        r = len(self._trajectory) - 1
         if r < 0:
             return closest_index
 
         while(r>=l):
             mid = int((l+r)/2)
-            dist = abs(self.trajectory[mid][0] - x)
+            dist = abs(self._trajectory[mid][0] - x)
             if dist < closest_dist:
                 closest_dist = dist
                 closest_index = mid
-            if self.trajectory[mid][0] < x:
+            if self._trajectory[mid][0] < x:
                 l = mid + 1
             else:
                 r = mid - 1
@@ -105,12 +105,12 @@ class RLController(DPControllerBase):
 
     def norm(self, x):
         mod = sqrt(x[0] ** 2 + x[1] ** 2 + x[2] ** 2)
+        if mod == 0:
+            return 1
         return mod
     
     def normalize(self, x):
-        mod = sqrt(x[0] ** 2 + x[1] ** 2 + x[2] ** 2)
-        if mod == 0:
-            return x
+        mod = self.norm(x)
         x = x / mod
         return x
     
@@ -120,16 +120,21 @@ class RLController(DPControllerBase):
     def compute_state_reward(self):
         perpendicular_index = self.perpendicular_point(self._vehicle_model.pos[0])
         if perpendicular_index != -1:
-            perpendicular_point = self.trajectory[perpendicular_index]
+            perpendicular_point = self._trajectory[perpendicular_index]
+            perpendicular_point = np.asarray(perpendicular_point)
             d = self.euclidean_distance(self._vehicle_model.pos, perpendicular_point)
 
-            slope = [0, 0, 0]
+            slope = np.array([0, 0, 0])
             if perpendicular_index >= 1:
-                slope = (perpendicular_point - self.trajectory[perpendicular_index - 1]) /  self._dt
-            elif perpendicular_index + 1 < len(self.trajectory):
-                slope = (self.trajectory[perpendicular_index + 1] - perpendicular_point) /  self._dt
+                slope = (perpendicular_point - self._trajectory[perpendicular_index - 1]) /  self._dt
+            elif perpendicular_index + 1 < len(self._trajectory):
+                slope = (self._trajectory[perpendicular_index + 1] - perpendicular_point) /  self._dt
             slope = self.normalize(slope)
             target = perpendicular_point + slope * L
+
+            if self.end_point is not None and perpendicular_point[0] == self.end_point[0] and \
+                perpendicular_point[1] == self.end_point[1] and perpendicular_point[2] == self.end_point[2]:
+                target = self.end_point
 
             direction = target - self._vehicle_model.pos
 
@@ -161,12 +166,19 @@ class RLController(DPControllerBase):
         return tau
 
     def check_done(self):
-        if self._num_iterations >= 200:
-            return True
+        if self.end_point is not None:
+            dist = self.euclidean_distance(self._vehicle_model.pos, self.end_point)
+            if dist <= 1:
+                return True
         return False
     
     def update_controller(self):
-        self.trajectory.append(self._reference['pos'])
+        self._trajectory.append(self._reference['pos'])
+
+        length = len(self._trajectory)
+        if self.end_point is None and length >= 2 and self._trajectory[length - 1][0] == self._trajectory[length - 2][0] \
+            and self._trajectory[length - 1][1] == self._trajectory[length - 2][1] and self._trajectory[length - 1][2] == self._trajectory[length - 2][2]:
+            self.end_point = self._trajectory[length - 1]
 
         if self._num_iterations < MIN_REPLAY_SIZE:
             action = random.randint(0, ACTION_SPACE_SIZE - 1)

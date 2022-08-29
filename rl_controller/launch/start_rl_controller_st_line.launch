@@ -1,0 +1,7 @@
+<launch>
+    <include file="$(find uuv_control_utils)/launch/start_straight_line_trajectory.launch">
+        <arg name="uuv_name" value="rexrov"/>
+    </include>
+
+    <include file="$(find rl_controller)/launch/start_rl_controller_demo.launch"></include>
+</launch>

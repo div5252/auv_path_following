@@ -27,7 +27,8 @@
         <node pkg="rl_controller"
             type="rl_controller_node.py"
             name="rl_controller_node"
-            output="screen">
+            output="screen"
+            required="true">
             <remap from="odom" to="pose_gt"/>
             <remap from="trajectory" to="dp_controller/trajectory"/>
             <remap from="input_trajectory" to="dp_controller/input_trajectory"/>
