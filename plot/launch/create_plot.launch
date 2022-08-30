@@ -1,0 +1,9 @@
+<launch>
+    <arg name="eps_no"/>
+
+    <node pkg="plot" type="create_plot_node.py" name="create_plot_node" output="screen">
+        <rosparam subst_value="true">
+            eps_no: $(arg eps_no)
+        </rosparam>
+    </node>
+</launch>

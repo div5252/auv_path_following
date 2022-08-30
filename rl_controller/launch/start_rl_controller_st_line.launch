@@ -4,4 +4,8 @@
     </include>
 
     <include file="$(find rl_controller)/launch/start_rl_controller_demo.launch"></include>
+
+    <include file="$(find plot)/launch/create_plot.launch">
+        <arg name="eps_no" value="0"/>
+    </include>
 </launch>

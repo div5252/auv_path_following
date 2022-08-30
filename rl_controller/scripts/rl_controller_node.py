@@ -22,7 +22,8 @@ ACTION_SPACE_SIZE = 360
 
 L = 10
 dir_path = os.path.dirname(os.path.realpath(__file__))
-PATH = os.path.join(dir_path, '../params/rl_controller.pt')
+PARAM_PATH = os.path.join(dir_path, '../params/rl_controller.pt')
+LOG_PATH = os.path.join(dir_path, '../log/reward.txt')
 
 class Network(nn.Module):
     def __init__(self):
@@ -56,6 +57,11 @@ class RLController(DPControllerBase):
     def __init__(self):
         super(RLController, self).__init__(self)
 
+        self._num_iterations = 0
+        self._store_trajectory = []
+        self.vehicle_prev_pos = np.asarray([1, 0, 0])
+        self.end_point = None
+
         self.replay_buffer = deque(maxlen=BUFFER_SIZE)
         self.rew_buffer = deque([0.0], maxlen=100)
 
@@ -65,39 +71,36 @@ class RLController(DPControllerBase):
         self.online_net = Network()
         self.target_net = Network()
 
-        if os.path.isfile(PATH) and os.stat(PATH).st_size > 0:
-            self.online_net.load_state_dict(torch.load(PATH))
+        if os.path.isfile(PARAM_PATH) and os.stat(PARAM_PATH).st_size > 0:
+            self.online_net.load_state_dict(torch.load(PARAM_PATH))
         self.target_net.load_state_dict(self.online_net.state_dict())
 
         self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=5e-4)
 
-        self._num_iterations = 0
-
-        self._trajectory = []
-
-        self.vehicle_prev_pos = np.asarray([1, 0, 0])
-        self.end_point = None
-
     def _reset_controller(self):
         super(RLController, self)._reset_controller()
-        torch.save(self.online_net.state_dict(), PATH)
+        torch.save(self.online_net.state_dict(), PARAM_PATH)
+        # Logging
+        log_file = open(LOG_PATH, 'a')
+        log_file.write(str(self.episode_reward) + "\n")
+        log_file.close()
         rospy.signal_shutdown('episode over')
 
     def perpendicular_point(self, x):
         closest_dist = 1e10
         closest_index = -1
         l = 0
-        r = len(self._trajectory) - 1
+        r = len(self._store_trajectory) - 1
         if r < 0:
             return closest_index
 
         while(r>=l):
             mid = int((l+r)/2)
-            dist = abs(self._trajectory[mid][0] - x)
+            dist = abs(self._store_trajectory[mid][0] - x)
             if dist < closest_dist:
                 closest_dist = dist
                 closest_index = mid
-            if self._trajectory[mid][0] < x:
+            if self._store_trajectory[mid][0] < x:
                 l = mid + 1
             else:
                 r = mid - 1
@@ -119,16 +122,16 @@ class RLController(DPControllerBase):
     
     def compute_state_reward(self):
         perpendicular_index = self.perpendicular_point(self._vehicle_model.pos[0])
-        if perpendicular_index != -1:
-            perpendicular_point = self._trajectory[perpendicular_index]
+        if perpendicular_index != -1 and self._dt != 0:
+            perpendicular_point = self._store_trajectory[perpendicular_index]
             perpendicular_point = np.asarray(perpendicular_point)
             d = self.euclidean_distance(self._vehicle_model.pos, perpendicular_point)
 
             slope = np.array([0, 0, 0])
             if perpendicular_index >= 1:
-                slope = (perpendicular_point - self._trajectory[perpendicular_index - 1]) /  self._dt
-            elif perpendicular_index + 1 < len(self._trajectory):
-                slope = (self._trajectory[perpendicular_index + 1] - perpendicular_point) /  self._dt
+                slope = (perpendicular_point - self._store_trajectory[perpendicular_index - 1]) /  self._dt
+            elif perpendicular_index + 1 < len(self._store_trajectory):
+                slope = (self._store_trajectory[perpendicular_index + 1] - perpendicular_point) /  self._dt
             slope = self.normalize(slope)
             target = perpendicular_point + slope * L
 
@@ -141,7 +144,10 @@ class RLController(DPControllerBase):
             vehicle_angle = (self._vehicle_model.pos - self.vehicle_prev_pos) / self._dt
             
             diff_vector = np.dot(direction, vehicle_angle) / (self.norm(direction) * self.norm(vehicle_angle))
-            diff_angle = acos(diff_vector)
+            if diff_vector < -1 or diff_vector > 1:
+                diff_angle = np.pi
+            else:
+                diff_angle = acos(diff_vector)
 
             state = np.array([d, diff_angle], dtype=np.float32)
             rew = -0.9 * abs(diff_angle) + 0.1 * pow(2, 2 - (d / 10))
@@ -168,17 +174,19 @@ class RLController(DPControllerBase):
     def check_done(self):
         if self.end_point is not None:
             dist = self.euclidean_distance(self._vehicle_model.pos, self.end_point)
-            if dist <= 1:
+            if dist <= 18:
                 return True
+        if self._num_iterations >= 50000:
+            return True
         return False
     
     def update_controller(self):
-        self._trajectory.append(self._reference['pos'])
+        self._store_trajectory.append(self._reference['pos'])
 
-        length = len(self._trajectory)
-        if self.end_point is None and length >= 2 and self._trajectory[length - 1][0] == self._trajectory[length - 2][0] \
-            and self._trajectory[length - 1][1] == self._trajectory[length - 2][1] and self._trajectory[length - 1][2] == self._trajectory[length - 2][2]:
-            self.end_point = self._trajectory[length - 1]
+        length = len(self._store_trajectory)
+        if self.end_point is None and length >= 2 and self._store_trajectory[length - 1][0] == self._store_trajectory[length - 2][0] \
+            and self._store_trajectory[length - 1][1] == self._store_trajectory[length - 2][1] and self._store_trajectory[length - 1][2] == self._store_trajectory[length - 2][2]:
+            self.end_point = self._store_trajectory[length - 1]
 
         if self._num_iterations < MIN_REPLAY_SIZE:
             action = random.randint(0, ACTION_SPACE_SIZE - 1)
@@ -222,14 +230,8 @@ class RLController(DPControllerBase):
 
             self.episode_reward += rew
 
-            # Logging
-            if step % 100 == 0:
-                print('Step', step)
-                print('Rew', rew)
-
             if done:
                 self._reset_controller()
-                self.rew_buffer.append(self.episode_reward)
             
             # Start gradient step
             transitions = random.sample(self.replay_buffer, BATCH_SIZE)
