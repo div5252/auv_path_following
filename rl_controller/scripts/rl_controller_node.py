@@ -22,7 +22,7 @@ ACTION_SPACE_SIZE = 360
 
 L = 10
 dir_path = os.path.dirname(os.path.realpath(__file__))
-PARAM_PATH = os.path.join(dir_path, '../params/rl_controller.pt')
+PARAM_PATH = os.path.join(dir_path, '../log/params.pt')
 LOG_PATH = os.path.join(dir_path, '../log/reward.txt')
 
 class Network(nn.Module):
@@ -174,7 +174,7 @@ class RLController(DPControllerBase):
     def check_done(self):
         if self.end_point is not None:
             dist = self.euclidean_distance(self._vehicle_model.pos, self.end_point)
-            if dist <= 18:
+            if dist <= 0.1:
                 return True
         if self._num_iterations >= 50000:
             return True

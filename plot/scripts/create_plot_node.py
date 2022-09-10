@@ -16,11 +16,13 @@ class Plot():
         self.x.append(data.pose.pose.position.x)
         self.y.append(data.pose.pose.position.y)
 
-    def show(self):
+    def write(self):
         plt.xlabel("X")
         plt.ylabel("Y")
         plt.plot(self.x, self.y, lw=2.0)
-        plt.show()
+
+        plt.savefig(PLOT_PATH%eps_no)
+        plt.close()
 
 if __name__ == '__main__':
     rospy.init_node('create_plot')
@@ -38,5 +40,4 @@ if __name__ == '__main__':
     except rospy.ROSInterruptException:
         print('plotting')
 
-    plt.savefig(PLOT_PATH%eps_no)   # save the figure to file
-    plt.close()
+    plot.write()    
