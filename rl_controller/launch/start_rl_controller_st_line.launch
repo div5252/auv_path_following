@@ -1,4 +1,6 @@
 <launch>
+    <arg name="eps_no"/>
+
     <include file="$(find uuv_control_utils)/launch/start_straight_line_trajectory.launch">
         <arg name="uuv_name" value="rexrov"/>
     </include>
@@ -6,6 +8,6 @@
     <include file="$(find rl_controller)/launch/start_rl_controller_demo.launch"></include>
 
     <include file="$(find plot)/launch/create_plot.launch">
-        <arg name="eps_no" value="0"/>
+        <arg name="eps_no" value="$(arg eps_no)"/>
     </include>
 </launch>

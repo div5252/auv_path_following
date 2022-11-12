@@ -26,17 +26,14 @@ PARAM_PATH = os.path.join(dir_path, '../log/params.pt')
 LOG_PATH = os.path.join(dir_path, '../log/reward.txt')
 
 class Network(nn.Module):
-    def __init__(self):
+    def __init__(self, n_feat=2, n_hid=1024):
         super(Network, self).__init__()
-
-        # Number of nodes in input layer
-        in_features = 2
 
         # Discrete action space
         self.net = nn.Sequential(
-            nn.Linear(in_features, 64),
-            nn.Tanh(),
-            nn.Linear(64, ACTION_SPACE_SIZE))
+            nn.Linear(n_feat, n_hid),
+            nn.ReLU(),
+            nn.Linear(n_hid, ACTION_SPACE_SIZE))
 
     def forward(self, x):
         return self.net(x)
@@ -68,22 +65,24 @@ class RLController(DPControllerBase):
         self.episode_reward = 0.0
 
         # Online network and target network
-        self.online_net = Network()
-        self.target_net = Network()
+        self.online_net = Network(2, 1024)
+        self.target_net = Network(2, 1024)
 
         if os.path.isfile(PARAM_PATH) and os.stat(PARAM_PATH).st_size > 0:
-            self.online_net.load_state_dict(torch.load(PARAM_PATH))
+            try:
+                self.online_net.load_state_dict(torch.load(PARAM_PATH))
+            except:
+                pass
         self.target_net.load_state_dict(self.online_net.state_dict())
 
-        self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=5e-4)
+        self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=1e-3)
 
     def _reset_controller(self):
         super(RLController, self)._reset_controller()
         torch.save(self.online_net.state_dict(), PARAM_PATH)
         # Logging
-        log_file = open(LOG_PATH, 'a')
-        log_file.write(str(self.episode_reward) + "\n")
-        log_file.close()
+        with open(LOG_PATH, 'a') as log_file:
+            log_file.write(str(self.episode_reward) + "\n")
         rospy.signal_shutdown('episode over')
 
     def perpendicular_point(self, x):
@@ -155,7 +154,7 @@ class RLController(DPControllerBase):
             return (state, rew)
 
         else:
-            state = np.array([0, 0, 0])
+            state = np.array([0, 0], dtype=np.float32)
             rew = 0.4
             return (state, rew)
 
@@ -168,15 +167,19 @@ class RLController(DPControllerBase):
         # Rudder angle torque
         angle -= 180
         tau[5] = (float) (angle) / 180
-        tau[5] *= 100
+        tau[5] *= 1000
         return tau
 
     def check_done(self):
         if self.end_point is not None:
             dist = self.euclidean_distance(self._vehicle_model.pos, self.end_point)
-            if dist <= 0.1:
+            if dist <= 1:
+                with open(LOG_PATH, 'a') as log_file:
+                    log_file.write("Reached destination in %d iterations, " % (self._num_iterations))
                 return True
-        if self._num_iterations >= 50000:
+        if self._num_iterations >= 10000:
+            with open(LOG_PATH, 'a') as log_file:
+                    log_file.write("Exceeded max iterations, ")
             return True
         return False
     
