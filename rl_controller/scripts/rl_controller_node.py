@@ -18,6 +18,8 @@ EPSILON_START=1.0
 EPSILON_END=0.02
 EPSILON_DECAY=10000
 TARGET_UPDATE_FREQ=1000
+
+STATE_SPACE_SIZE = 20
 ACTION_SPACE_SIZE = 360
 
 L = 10
@@ -32,6 +34,10 @@ class Network(nn.Module):
         # Discrete action space
         self.net = nn.Sequential(
             nn.Linear(n_feat, n_hid),
+            nn.ReLU(),
+            nn.Linear(n_hid, n_hid),
+            nn.ReLU(),
+            nn.Linear(n_hid, n_hid),
             nn.ReLU(),
             nn.Linear(n_hid, ACTION_SPACE_SIZE))
 
@@ -59,14 +65,16 @@ class RLController(DPControllerBase):
         self.vehicle_prev_pos = np.asarray([1, 0, 0])
         self.end_point = None
 
+        self.prev_action = np.zeros(6)
+
         self.replay_buffer = deque(maxlen=BUFFER_SIZE)
         self.rew_buffer = deque([0.0], maxlen=100)
 
         self.episode_reward = 0.0
 
         # Online network and target network
-        self.online_net = Network(2, 1024)
-        self.target_net = Network(2, 1024)
+        self.online_net = Network(STATE_SPACE_SIZE)
+        self.target_net = Network(STATE_SPACE_SIZE)
 
         if os.path.isfile(PARAM_PATH) and os.stat(PARAM_PATH).st_size > 0:
             try:
@@ -119,13 +127,15 @@ class RLController(DPControllerBase):
     def euclidean_distance(self, x, y):
         return sqrt((x[0] - y[0]) ** 2 + (x[1] - y[1]) ** 2 + (x[2] - y[2]) ** 2)
     
-    def compute_state_reward(self):
+    def compute_state_reward(self, action):
         perpendicular_index = self.perpendicular_point(self._vehicle_model.pos[0])
         if perpendicular_index != -1 and self._dt != 0:
+            # Computing d
             perpendicular_point = self._store_trajectory[perpendicular_index]
             perpendicular_point = np.asarray(perpendicular_point)
             d = self.euclidean_distance(self._vehicle_model.pos, perpendicular_point)
 
+            # Computing theta_d
             slope = np.array([0, 0, 0])
             if perpendicular_index >= 1:
                 slope = (perpendicular_point - self._store_trajectory[perpendicular_index - 1]) /  self._dt
@@ -149,13 +159,35 @@ class RLController(DPControllerBase):
                 diff_angle = acos(diff_vector)
 
             state = np.array([d, diff_angle], dtype=np.float32)
-            rew = -0.9 * abs(diff_angle) + 0.1 * pow(2, 2 - (d / 10))
+            # x
+            state = np.append(state, self._vehicle_model.pos)
+            # theta
+            state = np.append(state, self._vehicle_model.rot)
+            # v
+            state = np.append(state, self._vehicle_model.vel)
+            # omega
+            state = np.append(state, self._vehicle_model.vel)
+            # action
+            state = np.append(state, action)
+
+            # Computing reward
+            rew = -0.8 * abs(diff_angle) - 0.2 * d
 
             return (state, rew)
 
         else:
             state = np.array([0, 0], dtype=np.float32)
-            rew = 0.4
+            # x
+            state = np.append(state, self._vehicle_model.pos)
+            # theta
+            state = np.append(state, self._vehicle_model.rot)
+            # v
+            state = np.append(state, self._vehicle_model.vel)
+            # omega
+            state = np.append(state, self._vehicle_model.vel)
+            # action
+            state = np.append(state, action)
+            rew = 0
             return (state, rew)
 
     def compute_action(self, angle):
@@ -193,18 +225,19 @@ class RLController(DPControllerBase):
 
         if self._num_iterations < MIN_REPLAY_SIZE:
             action = random.randint(0, ACTION_SPACE_SIZE - 1)
-            obs, _ = self.compute_state_reward()
+            obs, _ = self.compute_state_reward(self.prev_action)
 
             # Perform action
             tau = self.compute_action(action)
             self.publish_control_wrench(tau)
 
-            new_obs, rew = self.compute_state_reward()
+            new_obs, rew = self.compute_state_reward(self.prev_action)
             done = self.check_done()
 
             transition = (obs, action, rew, done, new_obs)
             self.replay_buffer.append(transition)
             obs = new_obs
+            self.prev_action = action
 
             if done:
                 self._reset_controller()
@@ -215,7 +248,7 @@ class RLController(DPControllerBase):
 
             rnd_sample = random.random()
 
-            obs, _ = self.compute_state_reward()
+            obs, _ = self.compute_state_reward(self.prev_action)
             if rnd_sample <= epsilon:
                 action = random.randint(0, ACTION_SPACE_SIZE - 1)
             else:
@@ -225,13 +258,14 @@ class RLController(DPControllerBase):
             tau = self.compute_action(action)
             self.publish_control_wrench(tau)
 
-            new_obs, rew = self.compute_state_reward()
+            new_obs, rew = self.compute_state_reward(self.prev_action)
             done = self.check_done()
 
             transition = (obs, action, rew, done, new_obs)
             self.replay_buffer.append(transition)
 
             self.episode_reward += rew
+            self.prev_action = action
 
             if done:
                 self._reset_controller()
